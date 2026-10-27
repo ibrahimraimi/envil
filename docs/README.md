@@ -105,5 +105,5 @@ Verification rules:
 
 ## 5. Documentation Directory
 
-- [Setup & Installation Guide](file:///home/ibrahimraimi/documents/workstation/projects/tools/envil/docs/SETUP.md): Build requirements, installation methods, server deployment, database migrations, and keystore configuration.
-- [CLI Usage Guide](file:///home/ibrahimraimi/documents/workstation/projects/tools/envil/docs/USEAGE.md): Step-by-step workflow commands, first-run initialization, backup, diff, restore, machine recovery, and diagnostics.
+- [Setup & Installation Guide](./SETUP.md): Build requirements, installation methods, server deployment, database migrations, and keystore configuration.
+- [CLI Usage Guide](./USEAGE.md): Step-by-step workflow commands, first-run initialization, backup, diff, restore, machine recovery, and diagnostics.
