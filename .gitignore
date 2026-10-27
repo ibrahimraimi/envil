@@ -1,0 +1,17 @@
+# Binaries
+/bin/
+/envil
+/envil-server
+*.exe
+*.test
+
+# Environment files
+.env
+.env.*
+!.env.template
+.env.bak
+
+# Test coverage & artifacts
+*.out
+coverage.html
+.system_generated/

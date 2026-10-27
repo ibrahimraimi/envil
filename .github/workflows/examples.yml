@@ -1,0 +1,79 @@
+name: Examples & Smoke Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke-tests:
+    name: Run CLI & Server End-to-End Smoke Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+          cache: true
+
+      - name: Build Binaries
+        run: |
+          make build
+
+      - name: Start Envil Server
+        run: |
+          ./bin/envil-server &
+          SERVER_PID=$!
+          echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
+          sleep 2
+          curl --retry 5 --retry-delay 1 -s http://localhost:8080/v1/healthz
+
+      - name: Run CLI Example Scenarios
+        run: |
+          # 1. Setup isolated test workspace
+          WORKSPACE_DIR=$(mktemp -d)
+          cd "$WORKSPACE_DIR"
+          echo "WORKSPACE_DIR=$WORKSPACE_DIR"
+
+          # 2. Run diagnostics
+          $GITHUB_WORKSPACE/bin/envil doctor --server http://localhost:8080
+
+          # 3. Create sample environment files
+          cat << 'EOF' > .env
+          PORT=3000
+          DATABASE_URL=postgres://localhost:5432/app
+          SECRET_KEY=super-secret-token-xyz
+          EOF
+
+          # 4. Initialize account and link project
+          $GITHUB_WORKSPACE/bin/envil init --yes --server http://localhost:8080
+
+          # 5. Backup environment
+          $GITHUB_WORKSPACE/bin/envil backup --server http://localhost:8080
+
+          # 6. List project backups
+          $GITHUB_WORKSPACE/bin/envil history --server http://localhost:8080
+
+          # 7. Modify local env and check diff
+          echo "EXTRA_FLAG=true" >> .env
+          $GITHUB_WORKSPACE/bin/envil diff --server http://localhost:8080
+
+          # 8. Restore with force and verify byte identity
+          $GITHUB_WORKSPACE/bin/envil restore --force --server http://localhost:8080
+          grep "SECRET_KEY=super-secret-token-xyz" .env
+          test -f .env.bak
+
+          echo "All example scenarios executed successfully!"
+
+      - name: Stop Envil Server
+        if: always()
+        run: |
+          if [ -n "$SERVER_PID" ]; then
+            kill -TERM "$SERVER_PID" || true
+          fi
