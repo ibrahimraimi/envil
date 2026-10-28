@@ -17,9 +17,11 @@ import (
 	"github.com/ibrahimraimi/envil/internal/client"
 	"github.com/ibrahimraimi/envil/internal/crypto"
 	"github.com/ibrahimraimi/envil/internal/keystore"
+	"github.com/ibrahimraimi/envil/internal/service"
+	"github.com/ibrahimraimi/envil/internal/tui"
 )
 
-func newInitCommand(ks keystore.Keystore, getServerURL func() string) *cobra.Command {
+func newInitCommand(ks keystore.Keystore, getServerURL func() string, svc service.Service) *cobra.Command {
 	var skipConfirmation bool
 
 	cmd := &cobra.Command{
@@ -32,9 +34,20 @@ func newInitCommand(ks keystore.Keystore, getServerURL func() string) *cobra.Com
 			keys, err := ks.GetKeys()
 			if err != nil {
 				if errors.Is(err, keystore.ErrKeysNotFound) {
-					keys, err = executeFirstRunSetup(ctx, ks, serverURL, skipConfirmation)
-					if err != nil {
-						return err
+					shouldDisableTUI := noTUIFlag || os.Getenv("ENVIL_NO_TUI") == "1"
+					if !shouldDisableTUI && !skipConfirmation && isInteractiveTerminal() {
+						if err := tui.Run(svc, tui.NewSetupScreen(svc)); err != nil {
+							return err
+						}
+						keys, err = ks.GetKeys()
+						if err != nil {
+							return err
+						}
+					} else {
+						keys, err = executeFirstRunSetup(ctx, ks, serverURL, skipConfirmation)
+						if err != nil {
+							return err
+						}
 					}
 				} else {
 					return fmt.Errorf("read keystore: %w", err)

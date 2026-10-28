@@ -107,3 +107,16 @@ Verification rules:
 
 - [Setup & Installation Guide](./SETUP.md): Build requirements, installation methods, server deployment, database migrations, and keystore configuration.
 - [CLI Usage Guide](./USEAGE.md): Step-by-step workflow commands, first-run initialization, backup, diff, restore, machine recovery, and diagnostics.
+
+---
+
+## 6. Changelog
+
+### v0.1.1
+- **Added**: Interactive Terminal User Interface (TUI) built on Bubble Tea v2 (`charm.land/bubbletea/v2`, `charm.land/bubbles/v2`, `charm.land/lipgloss/v2`).
+- **Added**: `envil tui` command and automatic interactive dashboard on bare `envil` invocation.
+- **Added**: `--no-tui` persistent flag and `ENVIL_NO_TUI=1` environment variable for automation and CI/CD pipelines.
+- **Added**: Guided setup and recovery wizard interfaces with alt-screen memory isolation and phrase wiping.
+- **Added**: Variable-level diffing in restore flow with secret masking and on-demand reveal toggle (`v`).
+- **Changed**: Reusable service layer (`internal/service`) decoupled from Cobra commands.
+

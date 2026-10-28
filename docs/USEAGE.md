@@ -217,13 +217,63 @@ envil delete --yes
 
 ---
 
-### `envil version`
+### `envil tui`
 
-Prints the CLI version and system architecture.
+Opens the interactive Terminal User Interface (TUI) dashboard.
 
 ```bash
-envil version
+envil tui
 ```
+
+In interactive terminals, simply running `envil` with no arguments automatically opens the dashboard.
+
+---
+
+## Interactive Mode (Terminal UI)
+
+Envil includes a full-featured keyboard-driven Terminal User Interface built with Bubble Tea:
+
+| Invocation | Behavior |
+|---|---|
+| `envil` (no arguments, in a terminal) | Opens the interactive dashboard. |
+| `envil tui` | Opens the dashboard explicitly. |
+| `envil init`, `envil recover` (in a terminal) | Runs guided wizards for phrase generation and recovery. |
+| Any command with `--no-tui` (or when piping / non-TTY) | Standard plain text output for automation and scripts. |
+| Environment variable `ENVIL_NO_TUI=1` | Disables TUI globally. |
+
+### Keyboard Controls
+
+- **Dashboard**:
+  - `↑` / `↓` (or `k` / `j`): Navigate projects list
+  - `enter`: Open selected project details and version history
+  - `b`: Trigger backup for the selected or current project
+  - `r`: Refresh project list from server
+  - `?`: Toggle help shortcuts
+  - `q` / `ctrl+c`: Quit
+- **Project Detail**:
+  - `↑` / `↓` (or `k` / `j`): Select backup version
+  - `enter` / `d`: Open diff viewer for selected version
+  - `s`: Restore selected version
+  - `esc`: Return to dashboard
+- **Restore & Diff**:
+  - `↑` / `↓`: Move cursor across diff entries
+  - `v`: Toggle reveal of masked secret value (`********`) for selected key
+  - `y`: Confirm restore (automatically writes `.env.bak` safety copies)
+  - `n` / `esc`: Cancel restore and return to dashboard
+- **Setup & Recovery Wizards**:
+  - `enter`: Advance to verification / submit phrase
+  - `tab`: Switch between verification word fields
+  - `r`: Review phrase again
+  - `esc`: Cancel wizard
+
+---
+
+### Global Flags
+
+Available across all commands:
+
+- `--server <url>`: Override the Envil server endpoint (default: `http://localhost:8080` or via `ENVIL_SERVER_URL`).
+- `--no-tui`: Disable the interactive terminal UI and force non-interactive output (or via `ENVIL_NO_TUI=1`).
 
 ---
 
