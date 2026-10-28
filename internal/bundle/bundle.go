@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/ibrahimraimi/envil/internal/errs"
 )
 
 const (
@@ -15,10 +17,10 @@ const (
 )
 
 var (
-	ErrInvalidSchema   = errors.New("unsupported bundle schema version")
-	ErrEmptyBundle     = errors.New("bundle contains no files")
-	ErrBundleTooLarge  = errors.New("bundle exceeds 1 MiB limit")
-	ErrFileHashMismatch = errors.New("file checksum does not match content")
+	ErrInvalidSchema          = errors.New("unsupported bundle schema version")
+	ErrEmptyBundle            = errors.New("bundle contains no files")
+	ErrBundleTooLarge   error = errs.New(errs.TooLarge, nil)
+	ErrFileHashMismatch       = errors.New("file checksum does not match content")
 )
 
 type FileEntry struct {

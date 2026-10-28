@@ -11,14 +11,14 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/spf13/cobra"
-	"golang.org/x/term"
 	"github.com/ibrahimraimi/envil/internal/bundle"
 	"github.com/ibrahimraimi/envil/internal/client"
 	"github.com/ibrahimraimi/envil/internal/crypto"
 	"github.com/ibrahimraimi/envil/internal/keystore"
 	"github.com/ibrahimraimi/envil/internal/service"
 	"github.com/ibrahimraimi/envil/internal/tui"
+	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 func newInitCommand(ks keystore.Keystore, getServerURL func() string, svc service.Service) *cobra.Command {
@@ -188,9 +188,11 @@ func linkCurrentDirectory(ctx context.Context, ks keystore.Keystore, keys *crypt
 
 	fmt.Printf("✓ Linked directory '%s' to new project ID: %s\n", projectName, projectID)
 
-	if !CheckGitIgnoreProtectsEnv(cwd) {
-		fmt.Println("⚠️  WARNING: '.env' is not in your .gitignore file. Ensure secrets are not committed!")
+	candidates := FindDefaultEnvFiles(cwd)
+	if len(candidates) == 0 {
+		candidates = []string{".env"}
 	}
+	checkAndWarnGitIgnore(ctx, cwd, candidates, ".env")
 
 	return nil
 }

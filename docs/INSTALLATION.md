@@ -85,3 +85,8 @@ envil completion bash | sudo tee /etc/bash_completion.d/envil > /dev/null
 ```bash
 envil completion fish > ~/.config/fish/completions/envil.fish
 ```
+
+### PowerShell
+```powershell
+envil completion powershell | Out-String | Invoke-Expression
+```

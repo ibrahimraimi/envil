@@ -9,6 +9,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
+	"github.com/ibrahimraimi/envil/internal/errs"
 	"github.com/ibrahimraimi/envil/internal/service"
 )
 
@@ -104,6 +105,9 @@ func (s *RestoreScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 	case DiffLoadedMsg:
 		s.isLoading = false
 		if msg.Err != nil {
+			if errs.IsCode(msg.Err, errs.Rollback) {
+				return NewRollbackScreen(s.svc, s.projectID, s.version, msg.Err), nil
+			}
 			s.err = msg.Err
 			return s, nil
 		}
@@ -120,6 +124,9 @@ func (s *RestoreScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 
 	case RestoreDoneMsg:
 		s.isRestoring = false
+		if msg.Err != nil && errs.IsCode(msg.Err, errs.Rollback) {
+			return NewRollbackScreen(s.svc, s.projectID, s.version, msg.Err), nil
+		}
 		s.isDone = true
 		if msg.Err != nil {
 			s.err = msg.Err
@@ -166,7 +173,7 @@ func (s *RestoreScreen) View(width, height int) string {
 
 	case s.err != nil:
 		body = fmt.Sprintf("\n  %s\n\n  Press 'esc' to return to dashboard.",
-			ErrorStyle.Render(fmt.Sprintf("Error: %v", s.err)))
+			ErrorStyle.Render(fmt.Sprintf("Error: %s", errs.Format(s.err))))
 
 	case len(s.diffs) == 0:
 		body = "\n  Local files are identical to remote backup.\n\n  Press 'y' to force overwrite, or 'n' to cancel."

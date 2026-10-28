@@ -11,6 +11,7 @@ import (
 	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/ibrahimraimi/envil/internal/errs"
 	"github.com/ibrahimraimi/envil/internal/service"
 )
 
@@ -170,7 +171,7 @@ func (s *ProjectDetailScreen) View(width, height int) string {
 	case s.isLoading:
 		content = fmt.Sprintf("\n  %s Loading backup history...", s.spinner.View())
 	case s.err != nil:
-		content = fmt.Sprintf("\n  %s\n\n  Press 'esc' to go back.", ErrorStyle.Render(fmt.Sprintf("Error: %v", s.err)))
+		content = fmt.Sprintf("\n  %s\n\n  Press 'esc' to go back.", ErrorStyle.Render(fmt.Sprintf("Error: %s", errs.Format(s.err))))
 	case len(s.versions) == 0:
 		content = "\n  No backups found for this project.\n  Press 'esc' to return to dashboard."
 	default:

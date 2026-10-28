@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.2] - 2026-10-28
+
+### Added
+- **Rollback & Fork Detection**: Local monotonic version and ciphertext SHA-256 tracking (`~/.config/envil/state.json`, mode `0600`) protected by HMAC-SHA256 (`HKDF-SHA256` with info `"envil/v1/state"`), plus `--accept-server-state` override and `envil state reset [--project ID]`.
+- **Error Catalog & Exit Codes**: Centralized `internal/errs` package mapping network, clock skew, authentication, conflict, quota, bundle size, rollback/fork, state tamper, keychain, and initialization errors to plain-language messages, actionable hints, and exit codes (`0`–`4`).
+- **Expanded Doctor (CLI & TUI)**: 11 diagnostic checks (Version, Config directory, Keychain, Keys present, Server reachable, Account registered, Clock skew, State file, Rollback status, Git, Backup copies), `--json` output, and an interactive Doctor screen (`d` from TUI dashboard).
+- **`.gitignore` Safety Check**: Uses `git check-ignore` and `git ls-files` during `init`, `backup`, and `restore` to warn when environment files or backup copies are not ignored or are already tracked by Git, with `--no-git-check` and `git_check` configuration support.
+- **Shell Completions**: `envil completion [bash|zsh|fish|powershell]` command and dynamic `--version` completion for `restore` and `diff`.
+
+### Changed
+- **Safer Local Backup Copies**: Restore backup copies are now timestamped (`.env.bak.YYYYMMDDTHHMMSS` with collision counters), restricted to mode `0600`, checked against `.gitignore`, and automatically pruned to the newest `backup_copies` (default 3). Note: backup copies contain plaintext secrets and should be deleted when no longer needed.
+
+---
+
 ## [0.1.1] - 2026-10-28
 
 ### Added

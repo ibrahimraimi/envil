@@ -30,7 +30,9 @@ type fakeService struct {
 	revealedRemote     string
 	revealErr          error
 	restoreCalls       []int
+	restoreAcceptCalls int
 	restoreErr         error
+	resetStateCalls    []string
 	deleteProjectCalls []string
 	deleteAccountCalls int
 	doctorReport       service.DoctorReport
@@ -94,7 +96,16 @@ func (f *fakeService) RevealDiffValue(ctx context.Context, projectID string, ver
 
 func (f *fakeService) Restore(ctx context.Context, projectID string, version int, force bool) error {
 	f.restoreCalls = append(f.restoreCalls, version)
+	if service.ShouldAcceptServerState(ctx) {
+		f.restoreAcceptCalls++
+		return nil
+	}
 	return f.restoreErr
+}
+
+func (f *fakeService) ResetState(ctx context.Context, projectID string) error {
+	f.resetStateCalls = append(f.resetStateCalls, projectID)
+	return nil
 }
 
 func (f *fakeService) DeleteProject(ctx context.Context, projectID string) error {

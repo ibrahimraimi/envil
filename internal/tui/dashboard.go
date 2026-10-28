@@ -11,6 +11,7 @@ import (
 	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/ibrahimraimi/envil/internal/errs"
 	"github.com/ibrahimraimi/envil/internal/service"
 )
 
@@ -92,6 +93,10 @@ func (s *DashboardScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		case key.Matches(msg, s.keyMap.Help):
 			s.help.ShowAll = !s.help.ShowAll
 			return s, nil
+		case key.Matches(msg, s.keyMap.Doctor):
+			return s, func() tea.Msg {
+				return NavigateMsg{To: NewDoctorScreen(s.svc)}
+			}
 		case key.Matches(msg, s.keyMap.Backup):
 			targetID := ""
 			selectedRow := s.table.Cursor()
@@ -185,7 +190,7 @@ func (s *DashboardScreen) View(width, height int) string {
 	case s.isLoading:
 		content = fmt.Sprintf("\n  %s Loading projects from server...", s.spinner.View())
 	case s.err != nil:
-		content = fmt.Sprintf("\n  %s\n\n  Press 'r' to retry or 'q' to quit.", ErrorStyle.Render(fmt.Sprintf("Error: %v", s.err)))
+		content = fmt.Sprintf("\n  %s\n\n  Press 'r' to retry or 'q' to quit.", ErrorStyle.Render(fmt.Sprintf("Error: %s", errs.Format(s.err))))
 	case len(s.projects) == 0:
 		content = "\n  No projects found on this account.\n  Press 'b' to backup current directory, or 'envil init' to link a project."
 	default:

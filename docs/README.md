@@ -97,8 +97,9 @@ Verification rules:
 | **Server Compromise / Malicious Host** | Client-side encryption ensures the server operator holds only ciphertext blobs and project UUIDs. Project names and git remotes are encrypted. |
 | **Network Interception / Replay** | TLS in transit, plus Ed25519 signed canonical requests, 5-minute timestamp windows, and 10-minute nonce caches. |
 | **Blob Substitution Across Projects** | AEAD Additional Authenticated Data (AAD) cryptographically binds each blob to its specific project ID and version number. |
-| **Accidental Git Exposure** | `envil init` actively checks `.gitignore` and warns if `.env` is omitted. |
-| **Silent File Overwrite** | `envil restore` shows file diffs, requires `--force` for non-identical local files, and writes a `.env.bak` safety copy before writing. Restored files are set to mode `0600`. |
+| **Version Rollback / Fork by Compromised Server** | Detected after first sight of a project via monotonic version and ciphertext SHA-256 tracking in `~/.config/envil/state.json` (HMAC-SHA256 verified with `HKDF("envil/v1/state")`), with a trust-on-first-use limitation on a brand-new machine. |
+| **Accidental Git Exposure** | `envil init`, `backup`, and `restore` verify `.env` and `.env.bak.*` paths via `git check-ignore` and `git ls-files` and warn if unprotected. |
+| **Silent File Overwrite** | `envil restore` shows file diffs, requires `--force` for non-identical local files, and writes timestamped `.env.bak.<timestamp>` safety copies (`0600`), pruning to the newest `backup_copies` (default 3). |
 | **Shoulder Surfing / Shell Logs** | Recovery phrases are entered through hidden terminal prompts and are never accepted via CLI flags or environment variables. |
 
 ---
@@ -111,6 +112,14 @@ Verification rules:
 ---
 
 ## 6. Changelog
+
+### v0.1.2
+- **Added**: Rollback and fork detection (`internal/state`) with HMAC-protected `state.json`, `--accept-server-state`, and `envil state reset`.
+- **Added**: Centralized error catalog (`internal/errs`) with plain-language messages, hints, and documented exit codes (`0`–`4`).
+- **Added**: Expanded 11-check `envil doctor` (`--json` support) and interactive Doctor & Rollback screens in the TUI.
+- **Added**: Git ignore and tracked-file safety check (`git check-ignore`, `git ls-files`) with `--no-git-check` and `git_check` config.
+- **Added**: Shell completions (`bash`, `zsh`, `fish`, `powershell`) with dynamic `--version` completion.
+- **Changed**: Backup copies are timestamped (`.env.bak.<timestamp>`), mode `0600`, and pruned to `backup_copies` (default 3).
 
 ### v0.1.1
 - **Added**: Interactive Terminal User Interface (TUI) built on Bubble Tea v2 (`charm.land/bubbletea/v2`, `charm.land/bubbles/v2`, `charm.land/lipgloss/v2`).

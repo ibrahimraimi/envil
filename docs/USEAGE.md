@@ -123,8 +123,9 @@ envil restore --force
 **Safety Protections**:
 1. **Identical Files**: If local files are identical to the backup, they are safely skipped.
 2. **Conflict Prevention**: If a local file has modified content, `envil restore` refuses to overwrite it unless `--force` is provided.
-3. **Safety Backup**: Whenever an existing file is overwritten with `--force`, Envil writes a `.env.bak` copy of the pre-existing local file before applying changes.
-4. **Strict Permissions**: Restored files are written with file mode `0600` (readable/writable only by the file owner).
+3. **Safety Backup**: Whenever an existing file is overwritten with `--force`, Envil writes a timestamped `.env.bak.<timestamp>` copy (mode `0600`) of the pre-existing local file and prunes older copies to the newest `backup_copies` (default 3). Backup copies are plaintext and should be deleted when no longer needed.
+4. **Rollback & Fork Detection**: Before restoring, Envil checks the server's latest version and ciphertext SHA-256 against `~/.config/envil/state.json`. If the server reports an older version or a forked blob, Envil aborts with exit code `3` unless `--accept-server-state` is passed.
+5. **Strict Permissions**: Restored files are written with file mode `0600` (readable/writable only by the file owner).
 
 ---
 
@@ -185,14 +186,35 @@ Runs comprehensive health and diagnostic checks.
 
 ```bash
 envil doctor
+envil doctor --json
 ```
 
 **Checks Performed**:
-1. **Local Keystore**: Tests reading and writing to the OS keychain or local config file.
-2. **Server Connectivity**: Pings `/v1/healthz` and measures latency.
-3. **Clock Skew**: Checks time drift between local machine and server (alerts if skew > 60 seconds).
-4. **Project Linkage**: Verifies whether current directory contains `.envil.json` and if the remote project exists.
-5. **Git Safety**: Confirms `.env` is ignored by `.gitignore`.
+1. **Version**: Reports the CLI version and OS/architecture.
+2. **Config Directory**: Verifies `~/.config/envil` permissions (`0700` directory, `0600` files on Unix).
+3. **Keychain**: Tests reading and writing to the OS keychain or notes `0600` file fallback.
+4. **Keys Present**: Verifies local signing and encryption keys exist.
+5. **Server Reachable**: Pings `/v1/healthz` and measures latency.
+6. **Account Registered**: Verifies authenticated request acceptance.
+7. **Clock Skew**: Checks time drift between local machine and server (warns > 2m, fails > 5m).
+8. **State File**: Verifies `state.json` HMAC integrity.
+9. **Rollback Status**: Compares local seen version with server latest for the linked project.
+10. **Git Safety**: Confirms `.env` files are ignored and not tracked by Git.
+11. **Backup Copies**: Reports the count and age of local `.env.bak.*` copies.
+
+---
+
+### `envil state reset`
+
+Resets local version tracking in `state.json` for a specific project or rebuilds the state file.
+
+```bash
+# Reset all tracked projects / rebuild state.json
+envil state reset
+
+# Reset a single project
+envil state reset --project <uuid>
+```
 
 ---
 

@@ -363,3 +363,40 @@ func TestBuildAAD(t *testing.T) {
 		t.Fatal("BuildAAD must differ across versions")
 	}
 }
+
+func TestStateKeyDerivation(t *testing.T) {
+	keys1, err := KeysFromPhrase(testMnemonic1)
+	if err != nil {
+		t.Fatalf("derive keys1: %v", err)
+	}
+	keys2, err := KeysFromPhrase(testMnemonic2)
+	if err != nil {
+		t.Fatalf("derive keys2: %v", err)
+	}
+
+	stateKey1a, err := keys1.StateKey()
+	if err != nil {
+		t.Fatalf("derive stateKey1a: %v", err)
+	}
+	stateKey1b, err := keys1.StateKey()
+	if err != nil {
+		t.Fatalf("derive stateKey1b: %v", err)
+	}
+	stateKey2, err := keys2.StateKey()
+	if err != nil {
+		t.Fatalf("derive stateKey2: %v", err)
+	}
+
+	if len(stateKey1a) != KEY_SIZE {
+		t.Fatalf("expected state key length %d, got %d", KEY_SIZE, len(stateKey1a))
+	}
+	if !bytes.Equal(stateKey1a, stateKey1b) {
+		t.Fatal("expected deterministic state key for same account")
+	}
+	if bytes.Equal(stateKey1a, stateKey2) {
+		t.Fatal("expected distinct state keys across different accounts")
+	}
+	if bytes.Equal(stateKey1a, keys1.EncryptionRoot()) {
+		t.Fatal("state key must be derived, not equal to encryption root")
+	}
+}

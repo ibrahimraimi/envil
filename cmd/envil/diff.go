@@ -6,14 +6,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/ibrahimraimi/envil/internal/bundle"
 	"github.com/ibrahimraimi/envil/internal/crypto"
+	"github.com/ibrahimraimi/envil/internal/errs"
 	"github.com/ibrahimraimi/envil/internal/keystore"
+	"github.com/ibrahimraimi/envil/internal/service"
+	"github.com/ibrahimraimi/envil/internal/state"
+	"github.com/spf13/cobra"
 )
 
-func newDiffCommand(ks keystore.Keystore, getServerURL func() string) *cobra.Command {
+func newDiffCommand(ks keystore.Keystore, getServerURL func() string, svc service.Service) *cobra.Command {
 	var versionNumber int
 	var revealSecrets bool
 
@@ -29,6 +33,7 @@ func newDiffCommand(ks keystore.Keystore, getServerURL func() string) *cobra.Com
 
 	cmd.Flags().IntVarP(&versionNumber, "version", "v", 0, "Specific backup version to compare against (defaults to latest)")
 	cmd.Flags().BoolVar(&revealSecrets, "reveal", false, "Reveal secret values instead of masking them")
+	_ = cmd.RegisterFlagCompletionFunc("version", completeVersionNumbers(svc))
 	return cmd
 }
 
@@ -48,14 +53,56 @@ func executeDiff(ctx context.Context, ks keystore.Keystore, serverURL string, ve
 		return err
 	}
 
+	backups, err := apiClient.ListBackups(ctx, projectCfg.ProjectID)
+	if err != nil {
+		return err
+	}
+	serverLatest := 0
+	if len(backups) > 0 {
+		serverLatest = backups[0].Version
+	}
+
 	backupResp, err := apiClient.GetBackup(ctx, projectCfg.ProjectID, versionNumber)
 	if err != nil {
-		return fmt.Errorf("fetch backup for diff: %w", err)
+		return err
+	}
+	if serverLatest == 0 || (versionNumber == 0 && backupResp.Version > 0) {
+		serverLatest = backupResp.Version
 	}
 
 	rawCiphertext, err := base64.StdEncoding.DecodeString(backupResp.Blob)
 	if err != nil {
 		return fmt.Errorf("decode backup blob: %w", err)
+	}
+
+	stateKey, err := keys.StateKey()
+	if err != nil {
+		return err
+	}
+	statePath, err := state.GetDefaultStateFilePath()
+	if err != nil {
+		return err
+	}
+	stateStore := state.NewStore(statePath, stateKey)
+	prevEntry, err := stateStore.Get(projectCfg.ProjectID.String())
+	if err != nil {
+		return err
+	}
+
+	isLatestBlob := backupResp.Version == serverLatest
+	blobHash := ""
+	if isLatestBlob {
+		blobHash = state.ComputeBlobHash(rawCiphertext)
+	}
+
+	verdict := state.Check(prevEntry, serverLatest, blobHash)
+	if verdict == state.Rollback || verdict == state.Fork {
+		if !service.ShouldAcceptServerState(ctx) {
+			if verdict == state.Rollback {
+				return errs.NewRollback(serverLatest, prevEntry.LatestVersion)
+			}
+			return errs.NewFork(serverLatest)
+		}
 	}
 
 	projectKey, err := keys.ProjectKey(projectCfg.ProjectID.String())
@@ -71,7 +118,15 @@ func executeDiff(ctx context.Context, ks keystore.Keystore, serverURL string, ve
 
 	remoteBundle, err := bundle.DecodeBundle(decryptedBytes)
 	if err != nil {
-		return fmt.Errorf("decode remote bundle: %w", err)
+		return err
+	}
+
+	if isLatestBlob || service.ShouldAcceptServerState(ctx) {
+		_ = stateStore.Put(projectCfg.ProjectID.String(), state.Entry{
+			LatestVersion: serverLatest,
+			BlobSHA256:    blobHash,
+			SeenAt:        time.Now().UTC(),
+		})
 	}
 
 	for _, remoteFile := range remoteBundle.Files {
