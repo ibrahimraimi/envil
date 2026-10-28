@@ -16,14 +16,15 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ibrahimraimi/envil/internal/auth"
+	"github.com/ibrahimraimi/envil/internal/errs"
 	"github.com/ibrahimraimi/envil/internal/server"
 )
 
 var (
-	ErrVersionConflict = errors.New("backup conflict: remote version has changed, run 'envil diff' or 'envil restore' first")
-	ErrQuotaExceeded   = errors.New("storage quota exceeded")
-	ErrNotFound        = errors.New("resource not found")
-	ErrForbidden       = errors.New("forbidden")
+	ErrVersionConflict error = errs.New(errs.Conflict, nil)
+	ErrQuotaExceeded   error = errs.New(errs.Quota, nil)
+	ErrNotFound              = errors.New("resource not found")
+	ErrForbidden       error = errs.New(errs.Auth, errors.New("forbidden"))
 )
 
 type APIError struct {
@@ -60,7 +61,7 @@ func (c *Client) HealthCheck(ctx context.Context) error {
 
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("execute health check: %w", err)
+		return errs.New(errs.Offline, err)
 	}
 	defer response.Body.Close()
 
@@ -188,7 +189,7 @@ func (c *Client) executeRequest(ctx context.Context, method, path string, reques
 
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("execute request: %w", err)
+		return errs.New(errs.Offline, err)
 	}
 	defer response.Body.Close()
 
@@ -218,20 +219,27 @@ func parseResponseError(response *http.Response) error {
 		message = http.StatusText(response.StatusCode)
 	}
 
+	apiErr := &APIError{
+		StatusCode: response.StatusCode,
+		Code:       code,
+		Message:    message,
+	}
+
 	switch response.StatusCode {
 	case http.StatusConflict:
 		return ErrVersionConflict
 	case http.StatusRequestEntityTooLarge:
+		if strings.ToLower(code) == "blob_too_large" || strings.ToLower(code) == "too_large" {
+			return errs.New(errs.TooLarge, apiErr)
+		}
 		return ErrQuotaExceeded
 	case http.StatusNotFound:
 		return ErrNotFound
 	case http.StatusForbidden:
 		return ErrForbidden
+	case http.StatusUnauthorized:
+		return errs.FromHTTP(response.StatusCode, code, message, apiErr)
 	default:
-		return &APIError{
-			StatusCode: response.StatusCode,
-			Code:       code,
-			Message:    message,
-		}
+		return apiErr
 	}
 }

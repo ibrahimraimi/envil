@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/ibrahimraimi/envil/internal/errs"
 )
 
 const (
@@ -18,7 +19,7 @@ const (
 )
 
 var (
-	ErrNotLinked = errors.New("directory is not linked to an envil project, run 'envil init' first")
+	ErrNotLinked error = errs.New(errs.NotInit, errors.New("directory is not linked to an envil project"))
 )
 
 type ProjectConfig struct {

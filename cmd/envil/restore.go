@@ -6,14 +6,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/ibrahimraimi/envil/internal/bundle"
+	"github.com/ibrahimraimi/envil/internal/config"
 	"github.com/ibrahimraimi/envil/internal/crypto"
+	"github.com/ibrahimraimi/envil/internal/errs"
 	"github.com/ibrahimraimi/envil/internal/keystore"
+	"github.com/ibrahimraimi/envil/internal/localfiles"
+	"github.com/ibrahimraimi/envil/internal/service"
+	"github.com/ibrahimraimi/envil/internal/state"
+	"github.com/spf13/cobra"
 )
 
-func newRestoreCommand(ks keystore.Keystore, getServerURL func() string) *cobra.Command {
+func newRestoreCommand(ks keystore.Keystore, getServerURL func() string, svc service.Service) *cobra.Command {
 	var versionNumber int
 	var forceOverwrite bool
 
@@ -28,7 +34,8 @@ func newRestoreCommand(ks keystore.Keystore, getServerURL func() string) *cobra.
 	}
 
 	cmd.Flags().IntVarP(&versionNumber, "version", "v", 0, "Specific backup version to restore (0 for latest)")
-	cmd.Flags().BoolVarP(&forceOverwrite, "force", "f", false, "Overwrite existing files without prompting (creates .bak backups)")
+	cmd.Flags().BoolVarP(&forceOverwrite, "force", "f", false, "Overwrite existing files without prompting (creates timestamped .bak copies)")
+	_ = cmd.RegisterFlagCompletionFunc("version", completeVersionNumbers(svc))
 	return cmd
 }
 
@@ -48,14 +55,56 @@ func executeRestore(ctx context.Context, ks keystore.Keystore, serverURL string,
 		return err
 	}
 
+	backups, err := apiClient.ListBackups(ctx, projectCfg.ProjectID)
+	if err != nil {
+		return err
+	}
+	serverLatest := 0
+	if len(backups) > 0 {
+		serverLatest = backups[0].Version
+	}
+
 	backupResp, err := apiClient.GetBackup(ctx, projectCfg.ProjectID, versionNumber)
 	if err != nil {
-		return fmt.Errorf("fetch backup from server: %w", err)
+		return err
+	}
+	if serverLatest == 0 || (versionNumber == 0 && backupResp.Version > 0) {
+		serverLatest = backupResp.Version
 	}
 
 	rawCiphertext, err := base64.StdEncoding.DecodeString(backupResp.Blob)
 	if err != nil {
 		return fmt.Errorf("decode backup blob: %w", err)
+	}
+
+	stateKey, err := keys.StateKey()
+	if err != nil {
+		return err
+	}
+	statePath, err := state.GetDefaultStateFilePath()
+	if err != nil {
+		return err
+	}
+	stateStore := state.NewStore(statePath, stateKey)
+	prevEntry, err := stateStore.Get(projectCfg.ProjectID.String())
+	if err != nil {
+		return err
+	}
+
+	isLatestBlob := backupResp.Version == serverLatest
+	blobHash := ""
+	if isLatestBlob {
+		blobHash = state.ComputeBlobHash(rawCiphertext)
+	}
+
+	verdict := state.Check(prevEntry, serverLatest, blobHash)
+	if verdict == state.Rollback || verdict == state.Fork {
+		if !service.ShouldAcceptServerState(ctx) {
+			if verdict == state.Rollback {
+				return errs.NewRollback(serverLatest, prevEntry.LatestVersion)
+			}
+			return errs.NewFork(serverLatest)
+		}
 	}
 
 	projectKey, err := keys.ProjectKey(projectCfg.ProjectID.String())
@@ -71,20 +120,40 @@ func executeRestore(ctx context.Context, ks keystore.Keystore, serverURL string,
 
 	restoredBundle, err := bundle.DecodeBundle(decryptedBytes)
 	if err != nil {
-		return fmt.Errorf("decode bundle payload: %w", err)
+		return err
 	}
 
-	for _, entry := range restoredBundle.Files {
-		if err := restoreSingleFile(cwd, entry, forceOverwrite); err != nil {
+	if verdict == state.FirstSeen {
+		fmt.Printf("Note: first restore for this project on this machine (recording version %d).\n", serverLatest)
+	}
+
+	if isLatestBlob || service.ShouldAcceptServerState(ctx) {
+		if err := stateStore.Put(projectCfg.ProjectID.String(), state.Entry{
+			LatestVersion: serverLatest,
+			BlobSHA256:    blobHash,
+			SeenAt:        time.Now().UTC(),
+		}); err != nil {
 			return err
 		}
 	}
+
+	cfg := config.LoadClientConfig(serverURL)
+	now := time.Now().UTC()
+	var restoredNames []string
+	for _, entry := range restoredBundle.Files {
+		if err := restoreSingleFile(ctx, cwd, entry, forceOverwrite, cfg.BackupCopies, now); err != nil {
+			return err
+		}
+		restoredNames = append(restoredNames, entry.Name)
+	}
+
+	checkAndWarnGitIgnore(ctx, cwd, restoredNames, ".env")
 
 	fmt.Printf("✓ Restored %d file(s) from version %d (mode 0600)\n", len(restoredBundle.Files), backupResp.Version)
 	return nil
 }
 
-func restoreSingleFile(baseDir string, entry bundle.FileEntry, forceOverwrite bool) error {
+func restoreSingleFile(ctx context.Context, baseDir string, entry bundle.FileEntry, forceOverwrite bool, backupCopies int, now time.Time) error {
 	targetPath := filepath.Join(baseDir, entry.Name)
 
 	if existingBytes, err := os.ReadFile(targetPath); err == nil {
@@ -97,16 +166,23 @@ func restoreSingleFile(baseDir string, entry bundle.FileEntry, forceOverwrite bo
 			return fmt.Errorf("local file '%s' exists and has differing contents. Use --force to overwrite", entry.Name)
 		}
 
-		backupPath := targetPath + ".bak"
-		if err := os.WriteFile(backupPath, existingBytes, 0600); err != nil {
-			return fmt.Errorf("create backup copy '%s': %w", backupPath, err)
+		if backupCopies > 0 {
+			nextCopyName := localfiles.NextBackupCopyName(baseDir, entry.Name, now)
+			checkAndWarnGitIgnore(ctx, baseDir, []string{nextCopyName}, ".env.bak*")
+
+			createdCopy, err := localfiles.CreateBackupCopy(baseDir, entry.Name, existingBytes, now)
+			if err != nil {
+				return err
+			}
+			_ = localfiles.PruneBackupCopies(baseDir, entry.Name, backupCopies)
+			fmt.Printf("  - Created backup copy: %s\n", createdCopy)
 		}
-		fmt.Printf("  - Created backup copy: %s\n", filepath.Base(backupPath))
 	}
 
 	if err := os.WriteFile(targetPath, []byte(entry.Content), 0600); err != nil {
 		return fmt.Errorf("write file '%s': %w", entry.Name, err)
 	}
+	_ = os.Chmod(targetPath, 0600)
 
 	fmt.Printf("  - %s (restored)\n", entry.Name)
 	return nil

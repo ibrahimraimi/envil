@@ -9,19 +9,20 @@ type DashboardKeyMap struct {
 	Down    key.Binding
 	Enter   key.Binding
 	Backup  key.Binding
+	Doctor  key.Binding
 	Refresh key.Binding
 	Help    key.Binding
 	Quit    key.Binding
 }
 
 func (k DashboardKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Enter, k.Backup, k.Refresh, k.Quit}
+	return []key.Binding{k.Enter, k.Backup, k.Doctor, k.Refresh, k.Quit}
 }
 
 func (k DashboardKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Enter},
-		{k.Backup, k.Refresh, k.Help, k.Quit},
+		{k.Backup, k.Doctor, k.Refresh, k.Help, k.Quit},
 	}
 }
 
@@ -41,6 +42,10 @@ var DefaultDashboardKeyMap = DashboardKeyMap{
 	Backup: key.NewBinding(
 		key.WithKeys("b"),
 		key.WithHelp("b", "backup"),
+	),
+	Doctor: key.NewBinding(
+		key.WithKeys("d"),
+		key.WithHelp("d", "doctor"),
 	),
 	Refresh: key.NewBinding(
 		key.WithKeys("r"),

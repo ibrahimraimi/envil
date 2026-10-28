@@ -12,7 +12,8 @@ Envil is a secure, cloud-backed environment variable backup and recovery tool. I
 - **Authenticated Encryption**: Uses `XChaCha20-Poly1305` with 24-byte random nonces and AAD binding (`account_id || project_id || version`).
 - **Granular Diffing**: Compare local files with remote backup versions key-by-key, with secrets masked by default.
 - **Optimistic Concurrency**: Prevents race conditions and accidental overwrites with version conflict detection (`409 Conflict`).
-- **Safe Restores**: Automatically creates `.env.bak` safety copies before overwriting modified files, and applies strict `0600` permissions.
+- **Rollback & Fork Protection**: Tracks the highest seen version and ciphertext hash locally (`state.json`, HMAC-verified) to detect stale or substituted server responses.
+- **Safe Restores**: Automatically creates timestamped `.env.bak.<timestamp>` safety copies (`0600`), prunes older copies, and checks `.gitignore` rules before writing.
 
 ---
 
@@ -31,7 +32,7 @@ Envil is a secure, cloud-backed environment variable backup and recovery tool. I
 ```
 
 1. **Deterministic Isolation**: Each project derives an independent 32-byte data key from your master encryption root. Compromising one project key does not expose other projects.
-2. **Cryptographic Binding (AAD)**: Ciphertext blobs are bound to your account, project ID, and version number. The server cannot swap or rollback versions without detection.
+2. **Cryptographic Binding (AAD) & Rollback Detection**: Ciphertext blobs are bound to your account, project ID, and version number via AEAD AAD. In addition, the client records the highest seen version and ciphertext SHA-256 per project in an HMAC-protected local state file (`~/.config/envil/state.json`, mode `0600`) to detect rollback or fork attacks after first sight of a project (the first run on a new machine is trust on first use).
 3. **Local Keystore**: Derived keys are stored in your OS keychain (`go-keyring`) with an automatic `0600` file fallback (`~/.config/envil/keys.json`).
 
 ---
@@ -60,6 +61,56 @@ envil diff
 
 # Restore environment files onto any machine
 envil restore
+
+# Run system, keystore, server, clock, and rollback diagnostics
+envil doctor
+```
+
+---
+
+## Exit Codes & Error Catalog
+
+Envil uses consistent exit codes for scripting and CI/CD automation:
+
+| Exit Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | General error |
+| `2` | Usage or flag error |
+| `3` | Integrity warning (rollback, fork, or tampered local state) |
+| `4` | Network, authentication, clock skew, or quota error |
+
+| Code | Condition | Message | Hint |
+|---|---|---|---|
+| `E_CLOCK_SKEW` | Server rejects timestamp or skew > 5m | Your system clock differs from the server by more than 5 minutes. | Enable automatic time sync, then retry. Run `envil doctor`. |
+| `E_OFFLINE` | Network failure or timeout | Could not reach the Envil server. | Check your connection and `ENVIL_SERVER` setting. Your local files were not changed. |
+| `E_AUTH` | 401/403 or signature rejected | The server did not accept your credentials. | Run `envil doctor`. If you are on a new machine, run `envil recover`. |
+| `E_CONFLICT` | 409 on upload | A newer version exists than the one you started from. | Run `envil diff`, then restore or merge, then back up again. |
+| `E_QUOTA` | Quota exceeded | Your storage limit was reached. | Delete old projects or versions, then retry. |
+| `E_TOO_LARGE` | Blob above 1 MiB cap | The environment bundle is larger than the 1 MiB limit. | Remove large values or split projects. |
+| `E_ROLLBACK` | Rollback or fork detected | The server reported an older or divergent backup version for this project. | Nothing was changed. If you know this is expected, run again with `--accept-server-state`. |
+| `E_STATE_TAMPERED` | State MAC mismatch | The local state file could not be verified. | Run `envil state reset` to rebuild it. |
+| `E_KEYCHAIN` | Keychain unavailable | Could not access the system keychain. | See `envil doctor` for fallback options. |
+| `E_NOT_INITIALIZED` | No keys or no project link | This directory is not set up. | Run `envil init`. |
+
+---
+
+## Shell Completions
+
+Generate autocompletion scripts for your shell:
+
+```bash
+# Bash
+source <(envil completion bash)
+
+# Zsh
+envil completion zsh > "${fpath[1]}/_envil"
+
+# Fish
+envil completion fish > ~/.config/fish/completions/envil.fish
+
+# PowerShell
+envil completion powershell | Out-String | Invoke-Expression
 ```
 
 ---

@@ -7,15 +7,13 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/spf13/cobra"
 	"github.com/ibrahimraimi/envil/internal/bundle"
-	"github.com/ibrahimraimi/envil/internal/client"
-	"github.com/ibrahimraimi/envil/internal/config"
-	"github.com/ibrahimraimi/envil/internal/crypto"
 	"github.com/ibrahimraimi/envil/internal/keystore"
+	"github.com/ibrahimraimi/envil/internal/service"
+	"github.com/spf13/cobra"
 )
 
-func newBackupCommand(ks keystore.Keystore, getServerURL func() string) *cobra.Command {
+func newBackupCommand(ks keystore.Keystore, getServerURL func() string, svc service.Service) *cobra.Command {
 	var explicitFiles []string
 
 	cmd := &cobra.Command{
@@ -23,8 +21,7 @@ func newBackupCommand(ks keystore.Keystore, getServerURL func() string) *cobra.C
 		Short: "Encrypt and upload environment files for this project",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			serverURL := getServerURL()
-			return executeBackup(ctx, ks, serverURL, explicitFiles)
+			return executeBackup(ctx, svc, explicitFiles)
 		},
 	}
 
@@ -32,78 +29,33 @@ func newBackupCommand(ks keystore.Keystore, getServerURL func() string) *cobra.C
 	return cmd
 }
 
-func executeBackup(ctx context.Context, ks keystore.Keystore, serverURL string, explicitFiles []string) error {
+func executeBackup(ctx context.Context, svc service.Service, explicitFiles []string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get current directory: %w", err)
-	}
-
-	projectCfg, err := LoadProjectConfig(cwd)
-	if err != nil {
-		return err
 	}
 
 	filesToBackup := explicitFiles
 	if len(filesToBackup) == 0 {
 		filesToBackup = FindDefaultEnvFiles(cwd)
 	}
-
 	if len(filesToBackup) == 0 {
 		return errors.New("no .env files found in current directory to back up")
 	}
+
+	checkAndWarnGitIgnore(ctx, cwd, filesToBackup, "")
 
 	fileEntries, err := readFilesToEntries(cwd, filesToBackup)
 	if err != nil {
 		return err
 	}
 
-	rawBundle, err := bundle.CreateBundle(fileEntries, "envil/"+config.CLI_VERSION)
-	if err != nil {
-		return fmt.Errorf("create backup bundle: %w", err)
-	}
-
-	bundleBytes, err := bundle.EncodeBundle(rawBundle)
-	if err != nil {
-		return fmt.Errorf("encode backup bundle: %w", err)
-	}
-
-	apiClient, keys, err := ResolveClientAndKeys(ks, serverURL)
+	version, err := svc.Backup(ctx, "", filesToBackup)
 	if err != nil {
 		return err
 	}
 
-	backupsList, err := apiClient.ListBackups(ctx, projectCfg.ProjectID)
-	if err != nil {
-		return fmt.Errorf("query project history: %w", err)
-	}
-
-	expectedVersion := 0
-	if len(backupsList) > 0 {
-		expectedVersion = backupsList[0].Version
-	}
-	nextVersion := expectedVersion + 1
-
-	projectKey, err := keys.ProjectKey(projectCfg.ProjectID.String())
-	if err != nil {
-		return fmt.Errorf("derive project key: %w", err)
-	}
-
-	aad := crypto.BuildAAD(keys.AccountID(), projectCfg.ProjectID.String(), uint32(nextVersion))
-	sealedBlob, err := crypto.Seal(projectKey, bundleBytes, aad)
-	if err != nil {
-		return fmt.Errorf("encrypt backup blob: %w", err)
-	}
-
-	backupResponse, err := apiClient.CreateBackup(ctx, projectCfg.ProjectID, expectedVersion, sealedBlob)
-	if err != nil {
-		if errors.Is(err, client.ErrVersionConflict) {
-			return errors.New("backup conflict: remote version has changed. Run 'envil diff' or 'envil restore' first")
-		}
-		return fmt.Errorf("upload backup: %w", err)
-	}
-
-	fmt.Printf("✓ Backed up %d file(s) as version %d (size: %d bytes)\n",
-		len(fileEntries), backupResponse.Version, backupResponse.SizeBytes)
+	fmt.Printf("✓ Backed up %d file(s) as version %d\n", len(fileEntries), version)
 	for _, entry := range fileEntries {
 		fmt.Printf("  - %s\n", entry.Name)
 	}

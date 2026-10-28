@@ -9,6 +9,7 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/ibrahimraimi/envil/internal/errs"
 	"github.com/ibrahimraimi/envil/internal/service"
 )
 
@@ -67,7 +68,7 @@ func (s *BackupScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		s.isDone = true
 		if msg.Err != nil {
 			s.err = msg.Err
-			if strings.Contains(strings.ToLower(msg.Err.Error()), "conflict") {
+			if errs.IsCode(msg.Err, errs.Conflict) || strings.Contains(strings.ToLower(msg.Err.Error()), "conflict") {
 				s.isConflict = true
 			}
 			return s, nil
@@ -97,12 +98,13 @@ func (s *BackupScreen) View(width, height int) string {
 		body = fmt.Sprintf("\n  %s Reading local .env files, encrypting, and uploading to Envil server...\n", s.spinner.View())
 
 	case s.isConflict:
-		body = fmt.Sprintf("\n  %s\n\n  The remote server has a newer version.\n  Press 'd' to view diff, or 'esc' to return to dashboard.",
-			WarningBoxStyle.Render("CONFLICT: Remote backup version has changed"))
+		body = fmt.Sprintf("\n  %s\n\n  %s\n  Press 'd' to view diff, or 'esc' to return to dashboard.",
+			WarningBoxStyle.Render("CONFLICT: Remote backup version has changed"),
+			errs.Format(errs.New(errs.Conflict, nil)))
 
 	case s.err != nil:
 		body = fmt.Sprintf("\n  %s\n\n  Press 'esc' to return to dashboard.",
-			ErrorStyle.Render(fmt.Sprintf("Backup failed: %v", s.err)))
+			ErrorStyle.Render(fmt.Sprintf("Backup failed: %s", errs.Format(s.err))))
 
 	default:
 		body = fmt.Sprintf("\n  %s Backup completed successfully!\n\n  Created version: %s\n  Encrypted with:  XChaCha20-Poly1305 (client-side)\n\n  Press 'esc' to return to dashboard.",

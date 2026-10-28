@@ -15,11 +15,11 @@ import (
 )
 
 const (
-	FORMAT_VERSION byte   = 1
-	HKDF_SALT             = "envil-v1"
-	KEY_SIZE       int    = 32
-	ENTROPY_BITS   int    = 256
-	NONCE_SIZE     int    = 24
+	FORMAT_VERSION byte = 1
+	HKDF_SALT           = "envil-v1"
+	KEY_SIZE       int  = 32
+	ENTROPY_BITS   int  = 256
+	NONCE_SIZE     int  = 24
 )
 
 var (
@@ -121,6 +121,10 @@ func (k *Keys) PublicKey() ed25519.PublicKey {
 
 func (k *Keys) ProjectKey(projectID string) ([]byte, error) {
 	return deriveKey(k.encRoot[:], "envil/v1/project/"+projectID)
+}
+
+func (k *Keys) StateKey() ([]byte, error) {
+	return deriveKey(k.encRoot[:], "envil/v1/state")
 }
 
 func (k *Keys) Destroy() {

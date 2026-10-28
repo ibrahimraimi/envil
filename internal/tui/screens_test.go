@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/textinput"
+	"github.com/ibrahimraimi/envil/internal/errs"
 	"github.com/ibrahimraimi/envil/internal/service"
 )
 
@@ -266,5 +267,128 @@ func TestNoV1CharmbraceletImports(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("walk failed: %v", err)
+	}
+}
+
+func TestRollbackScreenCancelAndAccept(t *testing.T) {
+	rollbackErr := errs.NewRollback(3, 5)
+	svc := &fakeService{
+		diffErr:    rollbackErr,
+		restoreErr: rollbackErr,
+	}
+
+	// 1. Rollback warning screen appears when service returns rollback error
+	restoreScreen := NewRestoreScreen(svc, "proj-123", 0)
+	nextScreen, _ := restoreScreen.Update(DiffLoadedMsg{Err: rollbackErr})
+	rbScreen, ok := nextScreen.(*RollbackScreen)
+	if !ok {
+		t.Fatalf("expected transition to *RollbackScreen on rollback error, got %T", nextScreen)
+	}
+
+	view := rbScreen.View(80, 24)
+	if !strings.Contains(view, "Cancel") || !strings.Contains(view, "Accept") {
+		t.Fatalf("expected RollbackScreen to offer Cancel and Accept choices, got: %s", view)
+	}
+	if !strings.Contains(view, rollbackErr.Message) {
+		t.Fatalf("expected RollbackScreen to contain catalog message, got: %s", view)
+	}
+
+	// 2. Cancel makes no further service calls
+	_, cancelCmd := rbScreen.Update(keyMsg("n"))
+	if len(svc.restoreCalls) != 0 || svc.restoreAcceptCalls != 0 {
+		t.Fatalf("expected 0 service calls on cancel, got restoreCalls=%d, acceptCalls=%d",
+			len(svc.restoreCalls), svc.restoreAcceptCalls)
+	}
+	if cancelCmd == nil {
+		t.Fatal("expected navigation command on cancel")
+	}
+
+	// 3. Accept calls the service with the override and then continues
+	rbScreen2 := NewRollbackScreen(svc, "proj-123", 0, rollbackErr)
+	_, acceptCmd := rbScreen2.Update(keyMsg("y"))
+	if acceptCmd == nil {
+		t.Fatal("expected batch command on 'y' accept")
+	}
+	// Execute the accept restore command directly
+	msg := acceptAndRestoreCmd(svc, "proj-123", 0)()
+	rbScreen2.Update(msg)
+
+	if svc.restoreAcceptCalls != 1 {
+		t.Fatalf("expected 1 accept-override restore call, got %d", svc.restoreAcceptCalls)
+	}
+	if !rbScreen2.isDone || rbScreen2.err != nil {
+		t.Fatalf("expected rbScreen2 to complete without error after override, err=%v", rbScreen2.err)
+	}
+}
+
+func TestDoctorScreenStatusesHintsAndRerun(t *testing.T) {
+	svc := &fakeService{
+		doctorReport: service.DoctorReport{
+			Checks: []service.Check{
+				service.NewCheck("Version", service.StatusOK, "v0.1.2", ""),
+				service.NewCheck("Keychain", service.StatusWarn, "using file fallback", "Unlock system keychain."),
+				service.NewCheck("State file", service.StatusFail, "MAC mismatch", "Run envil state reset."),
+				service.NewCheck("Config directory", service.StatusSkipped, "skipped on Windows", ""),
+			},
+		},
+	}
+
+	// Reachable from Dashboard with 'd'
+	dash := NewDashboardScreen(svc)
+	_, navCmd := dash.Update(keyMsg("d"))
+	if navCmd == nil {
+		t.Fatal("expected navigation command when pressing 'd' on dashboard")
+	}
+	nav := navCmd().(NavigateMsg)
+	docScreen, ok := nav.To.(*DoctorScreen)
+	if !ok {
+		t.Fatalf("expected NavigateMsg to *DoctorScreen, got %T", nav.To)
+	}
+
+	// 4. Doctor screen renders each status, shows hint for selected check, and 'r' re-runs
+	docScreen.Update(DoctorLoadedMsg{Report: svc.doctorReport})
+	docView := docScreen.View(80, 24)
+	for _, status := range []string{"OK", "WARN", "FAIL", "SKIP"} {
+		if !strings.Contains(docView, status) {
+			t.Errorf("expected DoctorScreen view to contain status %q, got: %s", status, docView)
+		}
+	}
+
+	// Move down to Keychain check and verify its hint is shown
+	docScreen.Update(keyMsg("down"))
+	viewWithHint := docScreen.View(80, 24)
+	if !strings.Contains(viewWithHint, "Unlock system keychain.") {
+		t.Fatalf("expected selected check hint in view, got: %s", viewWithHint)
+	}
+
+	// Press 'r' to re-run checks
+	_, rerunCmd := docScreen.Update(keyMsg("r"))
+	if !docScreen.isLoading || rerunCmd == nil {
+		t.Fatal("expected DoctorScreen to enter loading state and return cmd on 'r'")
+	}
+
+	// 5. Doctor screen handles an error without crashing
+	offlineErr := errs.New(errs.Offline, nil)
+	docScreen.Update(DoctorLoadedMsg{Err: offlineErr})
+	errView := docScreen.View(80, 24)
+	if !strings.Contains(errView, offlineErr.Message) || !strings.Contains(errView, offlineErr.Hint) {
+		t.Fatalf("expected catalog offline message and hint in DoctorScreen error view, got: %s", errView)
+	}
+}
+
+func TestTUIErrorMessagesMatchCatalogText(t *testing.T) {
+	svc := &fakeService{hasKeys: true}
+	for _, code := range errs.AllCodes() {
+		catErr := errs.New(code, nil)
+		expectedText := errs.Format(catErr)
+
+		dash := NewDashboardScreen(svc)
+		dash.Update(ProjectsLoadedMsg{Err: catErr})
+		view := dash.View(100, 24)
+
+		if !strings.Contains(view, catErr.Message) || !strings.Contains(view, catErr.Hint) {
+			t.Errorf("TUI view for %s did not contain exact catalog text %q; got:\n%s",
+				code, expectedText, view)
+		}
 	}
 }

@@ -44,6 +44,11 @@ type RestoreDoneMsg struct {
 	Err error
 }
 
+type DoctorLoadedMsg struct {
+	Report service.DoctorReport
+	Err    error
+}
+
 type ErrMsg struct {
 	Err error
 }

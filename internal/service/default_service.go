@@ -5,8 +5,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"math"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,13 +15,17 @@ import (
 	"github.com/ibrahimraimi/envil/internal/client"
 	"github.com/ibrahimraimi/envil/internal/config"
 	"github.com/ibrahimraimi/envil/internal/crypto"
+	"github.com/ibrahimraimi/envil/internal/errs"
 	"github.com/ibrahimraimi/envil/internal/keystore"
+	"github.com/ibrahimraimi/envil/internal/localfiles"
 	"github.com/ibrahimraimi/envil/internal/server"
+	"github.com/ibrahimraimi/envil/internal/state"
 )
 
 type DefaultService struct {
 	keystore     keystore.Keystore
 	getServerURL func() string
+	statePath    string
 }
 
 func NewDefaultService(ks keystore.Keystore, getServerURL func() string) *DefaultService {
@@ -33,6 +35,11 @@ func NewDefaultService(ks keystore.Keystore, getServerURL func() string) *Defaul
 	}
 }
 
+func (s *DefaultService) WithStatePath(statePath string) *DefaultService {
+	s.statePath = statePath
+	return s
+}
+
 func (s *DefaultService) resolveClientAndKeys() (*client.Client, *crypto.Keys, error) {
 	keys, err := s.keystore.GetKeys()
 	if err != nil {
@@ -40,6 +47,126 @@ func (s *DefaultService) resolveClientAndKeys() (*client.Client, *crypto.Keys, e
 	}
 	apiClient := client.NewClient(s.getServerURL(), keys.Signing)
 	return apiClient, keys, nil
+}
+
+func (s *DefaultService) openStateStore(keys *crypto.Keys) (*state.Store, error) {
+	stateKey, err := keys.StateKey()
+	if err != nil {
+		return nil, fmt.Errorf("derive state key: %w", err)
+	}
+
+	targetPath := s.statePath
+	if targetPath == "" {
+		if fs, ok := s.keystore.(*keystore.FileStore); ok {
+			targetPath = filepath.Join(filepath.Dir(fs.FilePath()), state.StateFileName)
+		} else {
+			defaultPath, pathErr := state.GetDefaultStateFilePath()
+			if pathErr != nil {
+				return nil, pathErr
+			}
+			targetPath = defaultPath
+		}
+	}
+
+	return state.NewStore(targetPath, stateKey), nil
+}
+
+func (s *DefaultService) verifyAndRecordVersion(
+	ctx context.Context,
+	keys *crypto.Keys,
+	projectID string,
+	serverLatest int,
+	serverHash string,
+	recordOnSuccess bool,
+) (state.Verdict, error) {
+	store, err := s.openStateStore(keys)
+	if err != nil {
+		return state.OK, err
+	}
+
+	prev, err := store.Get(projectID)
+	if err != nil {
+		return state.OK, err
+	}
+
+	if serverLatest == 0 && prev == nil {
+		return state.OK, nil
+	}
+
+	verdict := state.Check(prev, serverLatest, serverHash)
+	switch verdict {
+	case state.Rollback:
+		if ShouldAcceptServerState(ctx) {
+			if err := store.Put(projectID, state.Entry{
+				LatestVersion: serverLatest,
+				BlobSHA256:    serverHash,
+				SeenAt:        time.Now().UTC(),
+			}); err != nil {
+				return verdict, err
+			}
+			return verdict, nil
+		}
+		return verdict, errs.NewRollback(serverLatest, prev.LatestVersion)
+
+	case state.Fork:
+		if ShouldAcceptServerState(ctx) {
+			if err := store.Put(projectID, state.Entry{
+				LatestVersion: serverLatest,
+				BlobSHA256:    serverHash,
+				SeenAt:        time.Now().UTC(),
+			}); err != nil {
+				return verdict, err
+			}
+			return verdict, nil
+		}
+		return verdict, errs.NewFork(serverLatest)
+
+	case state.FirstSeen, state.Advanced:
+		if recordOnSuccess && serverLatest > 0 {
+			if err := store.Put(projectID, state.Entry{
+				LatestVersion: serverLatest,
+				BlobSHA256:    serverHash,
+				SeenAt:        time.Now().UTC(),
+			}); err != nil {
+				return verdict, err
+			}
+		}
+		return verdict, nil
+
+	default:
+		if recordOnSuccess && serverLatest > 0 && serverHash != "" && (prev == nil || prev.BlobSHA256 == "") {
+			if err := store.Put(projectID, state.Entry{
+				LatestVersion: serverLatest,
+				BlobSHA256:    serverHash,
+				SeenAt:        time.Now().UTC(),
+			}); err != nil {
+				return verdict, err
+			}
+		}
+		return verdict, nil
+	}
+}
+
+func (s *DefaultService) ResetState(ctx context.Context, projectID string) error {
+	_, keys, err := s.resolveClientAndKeys()
+	if err != nil {
+		return err
+	}
+
+	targetID := projectID
+	if targetID == "current" {
+		targetUUID, _, resolveErr := s.resolveTargetProjectID("")
+		if resolveErr != nil {
+			return resolveErr
+		}
+		targetID = targetUUID.String()
+	}
+
+	store, err := s.openStateStore(keys)
+	if err != nil {
+		return err
+	}
+	return store.Reset(targetID)
 }
 
 func (s *DefaultService) HasKeys(ctx context.Context) (bool, error) {
@@ -115,19 +242,27 @@ func (s *DefaultService) ListProjects(ctx context.Context) ([]ProjectSummary, er
 
 	projectList, err := apiClient.ListProjects(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("fetch projects list: %w", err)
+		return nil, err
 	}
 
 	summaries := make([]ProjectSummary, 0, len(projectList))
 	for _, project := range projectList {
-		summary := s.buildProjectSummary(ctx, apiClient, keys, project)
+		summary, checkErr := s.buildProjectSummary(ctx, apiClient, keys, project)
+		if checkErr != nil {
+			return nil, checkErr
+		}
 		summaries = append(summaries, summary)
 	}
 
 	return summaries, nil
 }
 
-func (s *DefaultService) buildProjectSummary(ctx context.Context, apiClient *client.Client, keys *crypto.Keys, project server.ProjectResponse) ProjectSummary {
+func (s *DefaultService) buildProjectSummary(
+	ctx context.Context,
+	apiClient *client.Client,
+	keys *crypto.Keys,
+	project server.ProjectResponse,
+) (ProjectSummary, error) {
 	name, gitRemote := decryptProjectMeta(keys, project)
 
 	latestVersion := 0
@@ -139,6 +274,12 @@ func (s *DefaultService) buildProjectSummary(ctx context.Context, apiClient *cli
 		updatedAt = backups[0].CreatedAt
 	}
 
+	if err == nil {
+		if _, verifyErr := s.verifyAndRecordVersion(ctx, keys, project.ID.String(), latestVersion, "", false); verifyErr != nil {
+			return ProjectSummary{}, verifyErr
+		}
+	}
+
 	return ProjectSummary{
 		ID:            project.ID.String(),
 		Name:          name,
@@ -146,7 +287,7 @@ func (s *DefaultService) buildProjectSummary(ctx context.Context, apiClient *cli
 		LatestVersion: latestVersion,
 		UpdatedAt:     updatedAt,
 		CreatedAt:     project.CreatedAt,
-	}
+	}, nil
 }
 
 func (s *DefaultService) resolveTargetProjectID(projectID string) (uuid.UUID, string, error) {
@@ -177,14 +318,23 @@ func (s *DefaultService) History(ctx context.Context, projectID string) ([]Versi
 		return nil, err
 	}
 
-	apiClient, _, err := s.resolveClientAndKeys()
+	apiClient, keys, err := s.resolveClientAndKeys()
 	if err != nil {
 		return nil, err
 	}
 
 	backups, err := apiClient.ListBackups(ctx, targetUUID)
 	if err != nil {
-		return nil, fmt.Errorf("query backup history: %w", err)
+		return nil, err
+	}
+
+	serverLatest := 0
+	if len(backups) > 0 {
+		serverLatest = backups[0].Version
+	}
+
+	if _, err := s.verifyAndRecordVersion(ctx, keys, targetUUID.String(), serverLatest, "", false); err != nil {
+		return nil, err
 	}
 
 	versions := make([]VersionInfo, len(backups))
@@ -230,7 +380,7 @@ func (s *DefaultService) Backup(ctx context.Context, projectID string, files []s
 		return 0, err
 	}
 
-	nextVersion, expectedVersion, err := s.determineNextVersion(ctx, apiClient, targetUUID)
+	nextVersion, expectedVersion, err := s.determineNextVersion(ctx, apiClient, keys, targetUUID)
 	if err != nil {
 		return 0, err
 	}
@@ -242,25 +392,44 @@ func (s *DefaultService) Backup(ctx context.Context, projectID string, files []s
 
 	resp, err := apiClient.CreateBackup(ctx, targetUUID, expectedVersion, sealedBlob)
 	if err != nil {
-		if errors.Is(err, client.ErrVersionConflict) {
-			return 0, errors.New("backup conflict: remote version has changed. Run diff or restore first")
-		}
-		return 0, fmt.Errorf("upload backup to server: %w", err)
+		return 0, err
+	}
+
+	store, err := s.openStateStore(keys)
+	if err != nil {
+		return 0, err
+	}
+	if err := store.Put(targetUUID.String(), state.Entry{
+		LatestVersion: resp.Version,
+		BlobSHA256:    state.ComputeBlobHash(sealedBlob),
+		SeenAt:        time.Now().UTC(),
+	}); err != nil {
+		return 0, err
 	}
 
 	return resp.Version, nil
 }
 
-func (s *DefaultService) determineNextVersion(ctx context.Context, apiClient *client.Client, projectID uuid.UUID) (int, int, error) {
+func (s *DefaultService) determineNextVersion(
+	ctx context.Context,
+	apiClient *client.Client,
+	keys *crypto.Keys,
+	projectID uuid.UUID,
+) (int, int, error) {
 	backups, err := apiClient.ListBackups(ctx, projectID)
 	if err != nil {
-		return 0, 0, fmt.Errorf("query project history: %w", err)
+		return 0, 0, err
 	}
 
 	expectedVersion := 0
 	if len(backups) > 0 {
 		expectedVersion = backups[0].Version
 	}
+
+	if _, err := s.verifyAndRecordVersion(ctx, keys, projectID.String(), expectedVersion, "", false); err != nil {
+		return 0, 0, err
+	}
+
 	return expectedVersion + 1, expectedVersion, nil
 }
 
@@ -277,7 +446,7 @@ func (s *DefaultService) Diff(ctx context.Context, projectID string, version int
 		}
 	}
 
-	remoteBundle, err := s.fetchAndDecryptBackup(ctx, targetUUID, version)
+	remoteBundle, _, err := s.fetchAndDecryptBackup(ctx, targetUUID, version)
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +482,7 @@ func (s *DefaultService) RevealDiffValue(ctx context.Context, projectID string, 
 		cwd, _ = os.Getwd()
 	}
 
-	remoteBundle, err := s.fetchAndDecryptBackup(ctx, targetUUID, version)
+	remoteBundle, _, err := s.fetchAndDecryptBackup(ctx, targetUUID, version)
 	if err != nil {
 		return "", "", err
 	}
@@ -348,13 +517,15 @@ func (s *DefaultService) Restore(ctx context.Context, projectID string, version 
 		}
 	}
 
-	remoteBundle, err := s.fetchAndDecryptBackup(ctx, targetUUID, version)
+	remoteBundle, _, err := s.fetchAndDecryptBackup(ctx, targetUUID, version)
 	if err != nil {
 		return err
 	}
 
+	cfg := config.LoadClientConfig("")
+	now := time.Now().UTC()
 	for _, entry := range remoteBundle.Files {
-		if err := writeRestoredFile(cwd, entry, force); err != nil {
+		if _, err := writeRestoredFile(cwd, entry, force, cfg.BackupCopies, now); err != nil {
 			return err
 		}
 	}
@@ -374,7 +545,7 @@ func (s *DefaultService) DeleteProject(ctx context.Context, projectID string) er
 	}
 
 	if err := apiClient.DeleteProject(ctx, targetUUID); err != nil {
-		return fmt.Errorf("delete project on server: %w", err)
+		return err
 	}
 
 	if cwd != "" {
@@ -391,7 +562,7 @@ func (s *DefaultService) DeleteAccount(ctx context.Context) error {
 	}
 
 	if err := apiClient.DeleteAccount(ctx); err != nil {
-		return fmt.Errorf("delete account on server: %w", err)
+		return err
 	}
 
 	if err := s.keystore.DeleteKeys(); err != nil {
@@ -399,21 +570,6 @@ func (s *DefaultService) DeleteAccount(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-func (s *DefaultService) Doctor(ctx context.Context) (DoctorReport, error) {
-	var checks []DoctorCheck
-
-	keys, keyCheck := s.checkKeystoreHealth()
-	checks = append(checks, keyCheck)
-
-	serverChecks := s.checkServerHealth()
-	checks = append(checks, serverChecks...)
-
-	checks = append(checks, s.checkProjectConfigHealth(ctx, keys))
-	checks = append(checks, s.checkGitSafetyHealth())
-
-	return DoctorReport{Checks: checks}, nil
 }
 
 func (s *DefaultService) LinkCurrentDirectory(ctx context.Context, dir, name string) (string, error) {
@@ -452,11 +608,11 @@ func (s *DefaultService) LinkCurrentDirectory(ctx context.Context, dir, name str
 
 	_, err = apiClient.UpsertProject(ctx, projectUUID, metaCiphertext)
 	if err != nil {
-		return "", fmt.Errorf("create project on server: %w", err)
+		return "", err
 	}
 
-	config := &ProjectConfig{ProjectID: projectUUID}
-	if err := SaveProjectConfig(dir, config); err != nil {
+	projectCfg := &ProjectConfig{ProjectID: projectUUID}
+	if err := SaveProjectConfig(dir, projectCfg); err != nil {
 		return "", fmt.Errorf("save project configuration: %w", err)
 	}
 
@@ -471,164 +627,69 @@ func (s *DefaultService) LoadProjectConfig(dir string) (string, error) {
 	return cfg.ProjectID.String(), nil
 }
 
-func (s *DefaultService) fetchAndDecryptBackup(ctx context.Context, projectID uuid.UUID, version int) (*bundle.Bundle, error) {
+func (s *DefaultService) fetchAndDecryptBackup(ctx context.Context, projectID uuid.UUID, version int) (*bundle.Bundle, int, error) {
 	apiClient, keys, err := s.resolveClientAndKeys()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+
+	backups, err := apiClient.ListBackups(ctx, projectID)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	serverLatest := 0
+	if len(backups) > 0 {
+		serverLatest = backups[0].Version
 	}
 
 	backupResp, err := apiClient.GetBackup(ctx, projectID, version)
 	if err != nil {
-		return nil, fmt.Errorf("fetch backup from server: %w", err)
+		return nil, 0, err
+	}
+
+	if serverLatest == 0 || (version == 0 && backupResp.Version > 0) {
+		serverLatest = backupResp.Version
 	}
 
 	rawCiphertext, err := base64.StdEncoding.DecodeString(backupResp.Blob)
 	if err != nil {
-		return nil, fmt.Errorf("decode backup blob: %w", err)
+		return nil, 0, fmt.Errorf("decode backup blob: %w", err)
+	}
+
+	blobHash := ""
+	isLatestBlob := backupResp.Version == serverLatest
+	if isLatestBlob {
+		blobHash = state.ComputeBlobHash(rawCiphertext)
+	}
+
+	if _, err := s.verifyAndRecordVersion(ctx, keys, projectID.String(), serverLatest, blobHash, false); err != nil {
+		return nil, 0, err
 	}
 
 	projectKey, err := keys.ProjectKey(projectID.String())
 	if err != nil {
-		return nil, fmt.Errorf("derive project key: %w", err)
+		return nil, 0, fmt.Errorf("derive project key: %w", err)
 	}
 
 	aad := crypto.BuildAAD(keys.AccountID(), projectID.String(), uint32(backupResp.Version))
 	decryptedBytes, err := crypto.Open(projectKey, rawCiphertext, aad)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt backup: %w", err)
+		return nil, 0, fmt.Errorf("decrypt backup: %w", err)
 	}
 
-	return bundle.DecodeBundle(decryptedBytes)
-}
-
-func (s *DefaultService) checkKeystoreHealth() (*crypto.Keys, DoctorCheck) {
-	keys, err := s.keystore.GetKeys()
+	decodedBundle, err := bundle.DecodeBundle(decryptedBytes)
 	if err != nil {
-		return nil, DoctorCheck{
-			Name:    "Local Keystore",
-			Status:  "error",
-			Message: err.Error(),
-		}
-	}
-	return keys, DoctorCheck{
-		Name:    "Local Keystore",
-		Status:  "ok",
-		Message: "keys loaded successfully",
-	}
-}
-
-func (s *DefaultService) checkServerHealth() []DoctorCheck {
-	serverURL := s.getServerURL()
-	var checks []DoctorCheck
-
-	startTime := time.Now()
-	request, err := http.NewRequest(http.MethodGet, serverURL+"/v1/healthz", nil)
-	if err != nil {
-		checks = append(checks, DoctorCheck{Name: "Server Connectivity", Status: "error", Message: err.Error()})
-		return checks
+		return nil, 0, err
 	}
 
-	httpClient := &http.Client{Timeout: 5 * time.Second}
-	response, err := httpClient.Do(request)
-	if err != nil {
-		checks = append(checks, DoctorCheck{Name: "Server Connectivity", Status: "error", Message: err.Error()})
-		return checks
-	}
-	defer response.Body.Close()
-
-	duration := time.Since(startTime).Round(time.Millisecond)
-	if response.StatusCode != http.StatusOK {
-		checks = append(checks, DoctorCheck{Name: "Server Connectivity", Status: "error", Message: fmt.Sprintf("HTTP %d", response.StatusCode)})
-		return checks
-	}
-
-	checks = append(checks, DoctorCheck{
-		Name:    "Server Connectivity",
-		Status:  "ok",
-		Message: fmt.Sprintf("%s (latency %v)", serverURL, duration),
-	})
-
-	dateHeader := response.Header.Get("Date")
-	if dateHeader == "" {
-		checks = append(checks, DoctorCheck{Name: "Server Clock Skew", Status: "warning", Message: "server did not send Date header"})
-		return checks
-	}
-
-	serverTime, err := http.ParseTime(dateHeader)
-	if err != nil {
-		checks = append(checks, DoctorCheck{Name: "Server Clock Skew", Status: "warning", Message: "unparseable Date header"})
-		return checks
-	}
-
-	skewSeconds := math.Abs(time.Since(serverTime).Seconds())
-	if skewSeconds > 60 {
-		checks = append(checks, DoctorCheck{
-			Name:    "Server Clock Skew",
-			Status:  "error",
-			Message: fmt.Sprintf("%.1fs detected (>300s causes signature rejection)", skewSeconds),
-		})
-	} else {
-		checks = append(checks, DoctorCheck{
-			Name:    "Server Clock Skew",
-			Status:  "ok",
-			Message: fmt.Sprintf("%.1fs", skewSeconds),
-		})
-	}
-
-	return checks
-}
-
-func (s *DefaultService) checkProjectConfigHealth(ctx context.Context, keys *crypto.Keys) DoctorCheck {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return DoctorCheck{Name: "Current Project", Status: "warning", Message: err.Error()}
-	}
-
-	projectCfg, err := LoadProjectConfig(cwd)
-	if err != nil {
-		if errors.Is(err, ErrNotLinked) {
-			return DoctorCheck{Name: "Current Project", Status: "warning", Message: "directory not linked (run 'envil init')"}
-		}
-		return DoctorCheck{Name: "Current Project", Status: "error", Message: err.Error()}
-	}
-
-	if keys == nil {
-		return DoctorCheck{Name: "Current Project", Status: "ok", Message: fmt.Sprintf("linked to project %s", projectCfg.ProjectID)}
-	}
-
-	apiClient := client.NewClient(s.getServerURL(), keys.Signing)
-	backups, err := apiClient.ListBackups(ctx, projectCfg.ProjectID)
-	if err != nil {
-		return DoctorCheck{Name: "Current Project", Status: "error", Message: fmt.Sprintf("failed to query backups: %v", err)}
-	}
-
-	return DoctorCheck{
-		Name:    "Current Project",
-		Status:  "ok",
-		Message: fmt.Sprintf("linked to %s (%d backup(s))", projectCfg.ProjectID, len(backups)),
-	}
-}
-
-func (s *DefaultService) checkGitSafetyHealth() DoctorCheck {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return DoctorCheck{Name: "Git Safety", Status: "warning", Message: err.Error()}
-	}
-
-	isProtected := CheckGitIgnoreProtectsEnv(cwd)
-	if !isProtected {
-		return DoctorCheck{
-			Name:    "Git Safety",
-			Status:  "warning",
-			Message: ".gitignore does not protect .env files",
+	if isLatestBlob {
+		if _, err := s.verifyAndRecordVersion(ctx, keys, projectID.String(), serverLatest, blobHash, true); err != nil {
+			return nil, 0, err
 		}
 	}
 
-	return DoctorCheck{
-		Name:    "Git Safety",
-		Status:  "ok",
-		Message: ".gitignore protects environment files",
-	}
+	return decodedBundle, backupResp.Version, nil
 }
 
 func createEncryptedBundleBytes(cwd string, files []string) ([]byte, error) {
@@ -639,14 +700,15 @@ func createEncryptedBundleBytes(cwd string, files []string) ([]byte, error) {
 			return nil, fmt.Errorf("read %s: %w", filename, err)
 		}
 		entries = append(entries, bundle.FileEntry{
-			Name:    filename,
+			Name:    filepath.Base(filename),
 			Content: string(contentBytes),
+			SHA256:  bundle.ComputeContentHash(string(contentBytes)),
 		})
 	}
 
 	rawBundle, err := bundle.CreateBundle(entries, "envil/"+config.CLI_VERSION)
 	if err != nil {
-		return nil, fmt.Errorf("create backup bundle: %w", err)
+		return nil, err
 	}
 
 	return bundle.EncodeBundle(rawBundle)
@@ -667,27 +729,33 @@ func encryptBackupBundle(keys *crypto.Keys, projectID uuid.UUID, version int, bu
 	return sealedBlob, nil
 }
 
-func writeRestoredFile(baseDir string, entry bundle.FileEntry, forceOverwrite bool) error {
+func writeRestoredFile(baseDir string, entry bundle.FileEntry, forceOverwrite bool, backupCopies int, now time.Time) (string, error) {
 	targetPath := filepath.Join(baseDir, entry.Name)
+	var createdBackup string
 
 	if existingBytes, err := os.ReadFile(targetPath); err == nil {
 		if string(existingBytes) == entry.Content {
-			return nil
+			return "", nil
 		}
 		if !forceOverwrite {
-			return fmt.Errorf("local file '%s' exists and has differing contents. Use force to overwrite", entry.Name)
+			return "", fmt.Errorf("local file '%s' exists and has differing contents. Use --force to overwrite", entry.Name)
 		}
-		backupPath := targetPath + ".bak"
-		if err := os.WriteFile(backupPath, existingBytes, 0600); err != nil {
-			return fmt.Errorf("create safety backup '%s': %w", backupPath, err)
+		if backupCopies > 0 {
+			backupName, err := localfiles.CreateBackupCopy(baseDir, entry.Name, existingBytes, now)
+			if err != nil {
+				return "", err
+			}
+			createdBackup = backupName
+			_ = localfiles.PruneBackupCopies(baseDir, entry.Name, backupCopies)
 		}
 	}
 
 	if err := os.WriteFile(targetPath, []byte(entry.Content), 0600); err != nil {
-		return fmt.Errorf("write restored file '%s': %w", targetPath, err)
+		return "", fmt.Errorf("write restored file '%s': %w", targetPath, err)
 	}
+	_ = os.Chmod(targetPath, 0600)
 
-	return nil
+	return createdBackup, nil
 }
 
 func decryptProjectMeta(keys *crypto.Keys, project server.ProjectResponse) (string, string) {

@@ -8,8 +8,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/zalando/go-keyring"
 	"github.com/ibrahimraimi/envil/internal/crypto"
+	"github.com/ibrahimraimi/envil/internal/errs"
+	"github.com/zalando/go-keyring"
 )
 
 const (
@@ -20,7 +21,7 @@ const (
 )
 
 var (
-	ErrKeysNotFound = errors.New("no encryption keys found locally, run 'envil init' or 'envil recover'")
+	ErrKeysNotFound error = errs.New(errs.NotInit, errors.New("no encryption keys found locally"))
 )
 
 type Keystore interface {
@@ -52,7 +53,7 @@ func (s *KeyringStore) GetKeys() (*crypto.Keys, error) {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return nil, ErrKeysNotFound
 		}
-		return nil, fmt.Errorf("read from keyring: %w", err)
+		return nil, errs.New(errs.Keychain, fmt.Errorf("read from keyring: %w", err))
 	}
 
 	return deserializeKeys(serializedPayload)
@@ -65,14 +66,14 @@ func (s *KeyringStore) SaveKeys(keys *crypto.Keys) error {
 	}
 
 	if err := keyring.Set(s.service, s.user, serializedPayload); err != nil {
-		return fmt.Errorf("write to keyring: %w", err)
+		return errs.New(errs.Keychain, fmt.Errorf("write to keyring: %w", err))
 	}
 	return nil
 }
 
 func (s *KeyringStore) DeleteKeys() error {
 	if err := keyring.Delete(s.service, s.user); err != nil && !errors.Is(err, keyring.ErrNotFound) {
-		return fmt.Errorf("delete from keyring: %w", err)
+		return errs.New(errs.Keychain, fmt.Errorf("delete from keyring: %w", err))
 	}
 	return nil
 }
@@ -85,7 +86,23 @@ func NewFileStore(filePath string) *FileStore {
 	return &FileStore{filePath: filePath}
 }
 
+func (s *FileStore) FilePath() string {
+	return s.filePath
+}
+
+func ProbeKeyring() error {
+	const probeUser = "doctor-probe"
+	if err := keyring.Set(KEYRING_SERVICE, probeUser, "ok"); err != nil {
+		return err
+	}
+	_ = keyring.Delete(KEYRING_SERVICE, probeUser)
+	return nil
+}
+
 func GetDefaultKeysFilePath() (string, error) {
+	if customDir := os.Getenv("ENVIL_CONFIG_DIR"); customDir != "" {
+		return filepath.Join(customDir, KEYS_FILE_NAME), nil
+	}
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		homeDir, err := os.UserHomeDir()
