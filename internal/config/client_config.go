@@ -6,7 +6,7 @@ import (
 
 const (
 	DEFAULT_SERVER_URL = "http://localhost:8080"
-	CLI_VERSION        = "0.1.0"
+	CLI_VERSION        = "0.1.1"
 )
 
 type ClientConfig struct {

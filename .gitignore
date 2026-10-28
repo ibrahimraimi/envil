@@ -15,3 +15,7 @@
 *.out
 coverage.html
 .system_generated/
+
+# Agent configuration
+GEMINI.md
+

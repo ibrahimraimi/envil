@@ -12,15 +12,23 @@ import (
 	"golang.org/x/term"
 	"github.com/ibrahimraimi/envil/internal/crypto"
 	"github.com/ibrahimraimi/envil/internal/keystore"
+	"github.com/ibrahimraimi/envil/internal/service"
+	"github.com/ibrahimraimi/envil/internal/tui"
 )
 
-func newRecoverCommand(ks keystore.Keystore, getServerURL func() string) *cobra.Command {
+func newRecoverCommand(ks keystore.Keystore, getServerURL func() string, svc service.Service) *cobra.Command {
 	return &cobra.Command{
 		Use:   "recover",
 		Short: "Recover an existing Envil account using your 24-word recovery phrase",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			serverURL := getServerURL()
+
+			shouldDisableTUI := noTUIFlag || os.Getenv("ENVIL_NO_TUI") == "1"
+			if !shouldDisableTUI && isInteractiveTerminal() {
+				return tui.Run(svc, tui.NewRecoverScreen(svc))
+			}
+
 			return executeRecover(ctx, ks, serverURL)
 		},
 	}
